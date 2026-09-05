@@ -7,7 +7,6 @@ const {
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
-const qrcode = require('qrcode');
 const { Pool } = require('pg');
 
 const app = express();
@@ -26,7 +25,7 @@ const pool = new Pool({
 });
 
 const sessions = new Map();
-const qrCodes = new Map();
+const pairingCodes = new Map();
 
 // Initialize DB and Auto-Cleanup messages older than 90 days
 async function initDB() {
@@ -56,7 +55,6 @@ async function initDB() {
     await pool.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS session_id TEXT DEFAULT 'default';`);
   } catch (err) {}
 
-  // Delete messages older than 90 days automatically
   await pool.query(`DELETE FROM messages WHERE timestamp < NOW() - INTERVAL '90 days';`);
   console.log('Database initialized & 90-day retention policy enforced.');
 }
@@ -147,8 +145,8 @@ async function saveMessages(sessionId, messagesArray) {
   }
 }
 
-// Spin up a WhatsApp instance
-async function startSession(sessionId) {
+// Spin up a WhatsApp instance and generate a 8-digit pairing code
+async function startSessionWithCode(sessionId, phoneNumber) {
   if (sessions.has(sessionId)) return;
 
   const { state, saveCreds } = await usePostgresAuthState(sessionId);
@@ -159,11 +157,9 @@ async function startSession(sessionId) {
     auth: state,
     printQRInTerminal: false,
     markOnlineOnConnect: true,
-    
-    // FIX FOR LOGIN DISCONNECT / SCAN FAILURE:
-    syncFullHistory: false,                   // Disables heavy initial sync payload
-    browser: ['Ubuntu', 'Chrome', '20.0.04'], // Custom user-agent for faster handshake
-    connectTimeoutMs: 60000,                 // 60 second socket timeout
+    syncFullHistory: false,
+    browser: ['Ubuntu', 'Chrome', '20.0.04'],
+    connectTimeoutMs: 60000,
     defaultQueryTimeoutMs: 0,
     keepAliveIntervalMs: 10000
   });
@@ -171,23 +167,31 @@ async function startSession(sessionId) {
   sessions.set(sessionId, sock);
   sock.ev.on('creds.update', saveCreds);
 
+  // Request 8-digit pairing code if not already registered
+  if (!sock.authState.creds.registered) {
+    setTimeout(async () => {
+      try {
+        const cleanPhone = phoneNumber.replace(/[^0-9]/g, '');
+        const code = await sock.requestPairingCode(cleanPhone);
+        pairingCodes.set(sessionId, code);
+      } catch (err) {
+        console.error('Error requesting pairing code:', err.message);
+      }
+    }, 3000);
+  }
+
   sock.ev.on('connection.update', (update) => {
-    const { connection, lastDisconnect, qr } = update;
-    if (qr) {
-      qrcode.toDataURL(qr, (err, url) => {
-        if (!err) qrCodes.set(sessionId, url);
-      });
-    }
+    const { connection, lastDisconnect } = update;
     if (connection === 'open') {
       console.log(`Session [${sessionId}] connected!`);
-      qrCodes.delete(sessionId);
+      pairingCodes.delete(sessionId);
       io.emit('session-update');
     }
     if (connection === 'close') {
       sessions.delete(sessionId);
       io.emit('session-update');
       const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-      if (shouldReconnect) startSession(sessionId);
+      if (shouldReconnect) startSessionWithCode(sessionId, phoneNumber);
     }
   });
 
@@ -199,12 +203,15 @@ async function startSession(sessionId) {
   });
 }
 
-// Restore active sessions
+// Restore active sessions on reboot
 async function restoreAllSessions() {
   await initDB();
   const res = await pool.query('SELECT DISTINCT session_id FROM auth_state WHERE session_id IS NOT NULL');
   for (const row of res.rows) {
-    startSession(row.session_id);
+    const { state } = await usePostgresAuthState(row.session_id);
+    if (state.creds.registered) {
+      startSessionWithCode(row.session_id, '');
+    }
   }
 }
 
@@ -248,13 +255,13 @@ app.get('/', (req, res) => {
       <style>
         * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
         body { display: flex; height: 100vh; background-color: #111b21; color: #e9edef; }
-        #sidebar { width: 30%; border-right: 1px solid #222d34; display: flex; flex-direction: column; background: #111b21; }
-        #chat-window { width: 70%; display: flex; flex-direction: column; background: #0b141a; }
-        .header { padding: 10px 16px; background: #202c33; display: flex; justify-content: space-between; align-items: center; font-weight: bold; }
-        .add-box { padding: 10px; background: #111b21; border-bottom: 1px solid #222d34; }
-        input, button { padding: 8px; border-radius: 6px; border: none; }
-        input { background: #2a3942; color: white; width: 65%; }
-        button { background: #00a884; color: white; font-weight: bold; cursor: pointer; width: 30%; }
+        #sidebar { width: 32%; border-right: 1px solid #222d34; display: flex; flex-direction: column; background: #111b21; }
+        #chat-window { width: 68%; display: flex; flex-direction: column; background: #0b141a; }
+        .header { padding: 12px 16px; background: #202c33; display: flex; justify-content: space-between; align-items: center; font-weight: bold; }
+        .add-box { padding: 12px; background: #111b21; border-bottom: 1px solid #222d34; display: flex; flex-direction: column; gap: 8px; }
+        input, button { padding: 10px; border-radius: 6px; border: none; font-size: 0.9em; }
+        input { background: #2a3942; color: white; width: 100%; }
+        button { background: #00a884; color: white; font-weight: bold; cursor: pointer; width: 100%; }
         #chat-list { overflow-y: auto; flex: 1; }
         .chat-item { padding: 12px 16px; border-bottom: 1px solid #222d34; cursor: pointer; display: flex; flex-direction: column; }
         .chat-item:hover { background: #202c33; }
@@ -273,8 +280,9 @@ app.get('/', (req, res) => {
         <div class="header">WhatsApp Accounts</div>
         <div class="add-box">
           <form action="/create-session" method="POST">
-            <input type="text" name="sessionId" placeholder="Device Name" required />
-            <button type="submit">Add Device</button>
+            <input type="text" name="sessionId" placeholder="Device Label (e.g. Business)" required style="margin-bottom:6px;" />
+            <input type="text" name="phoneNumber" placeholder="Phone Number (e.g. 256700000000)" required style="margin-bottom:6px;" />
+            <button type="submit">Get Pairing Code</button>
           </form>
         </div>
         <div id="chat-list">Loading chats...</div>
@@ -348,19 +356,19 @@ app.get('/', (req, res) => {
 });
 
 app.post('/create-session', (req, res) => {
-  const { sessionId } = req.body;
+  const { sessionId, phoneNumber } = req.body;
   const cleanId = sessionId.trim().replace(/[^a-zA-Z0-9_-]/g, '');
-  if (!cleanId) return res.redirect('/');
+  if (!cleanId || !phoneNumber) return res.redirect('/');
   
-  startSession(cleanId);
-  res.redirect(`/scan?id=${cleanId}`);
+  startSessionWithCode(cleanId, phoneNumber);
+  res.redirect(`/pair-code?id=${cleanId}`);
 });
 
-app.get('/scan', (req, res) => {
+app.get('/pair-code', (req, res) => {
   const { id } = req.query;
-  const qr = qrCodes.get(id);
+  const code = pairingCodes.get(id);
 
-  if (!qr && sessions.has(id)) {
+  if (!code && sessions.has(id) && !pairingCodes.has(id)) {
     return res.send(`
       <body style="font-family:sans-serif;text-align:center;padding:40px;background:#111b21;color:white;">
         <h2>Device "${id}" Connected Successfully!</h2>
@@ -376,8 +384,9 @@ app.get('/scan', (req, res) => {
         <meta http-equiv="refresh" content="3">
       </head>
       <body style="font-family:sans-serif;display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;background:#111b21;color:white;">
-        <h2>Scan QR Code for Device: ${id}</h2>
-        ${qr ? `<img src="${qr}" style="width:250px;height:250px;margin:20px;border-radius:8px;" />` : '<p>Generating QR Code... please wait.</p>'}
+        <h2>Pairing Code for Device: ${id}</h2>
+        ${code ? `<h1 style="font-size:3em;letter-spacing:6px;background:#202c33;padding:15px 30px;border-radius:10px;margin:20px;color:#00a884;">${code}</h1>` : '<p>Requesting Pairing Code... please wait 3 seconds.</p>'}
+        <p style="color:#8696a0;">Open WhatsApp on phone > Linked Devices > Link with Phone Number Instead > Enter Code</p>
         <br><a href="/" style="color:#00a884;">Back to Console</a>
       </body>
     </html>
@@ -388,4 +397,4 @@ server.listen(PORT, async () => {
   console.log(`Server running on port ${PORT}`);
   await restoreAllSessions();
 });
-    
+  
