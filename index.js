@@ -14,7 +14,7 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 
-// Database connection
+// Initialize PostgreSQL connection pool with rejectUnauthorized: false
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
@@ -194,7 +194,7 @@ async function restoreAllSessions() {
   }
 }
 
-// Keeping status online across all sessions
+// Keep status online across all sessions
 setInterval(async () => {
   for (const [id, sock] of sessions.entries()) {
     try {
@@ -242,7 +242,7 @@ app.get('/', async (req, res) => {
 
 app.post('/create-session', (req, res) => {
   const { sessionId } = req.body;
-  const cleanId = sessionId.trim().replace(/[^a-zA-Z0-0_-]/g, '');
+  const cleanId = sessionId.trim().replace(/[^a-zA-Z0-9_-]/g, '');
   if (!cleanId) return res.redirect('/');
   
   startSession(cleanId);
@@ -269,7 +269,8 @@ app.get('/scan', (req, res) => {
         <meta http-equiv="refresh" content="3">
       </head>
       <body style="font-family:sans-serif;display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;">
-        <h2>Scan QR for Device: ${id}</h2>${qr ? `<img src="${qr}" style="width:250px;height:250px;" />` : '<p>Generating QR Code... please wait.</p>'}
+        <h2>Scan QR for Device: ${id}</h2>
+        ${qr ? `<img src="${qr}" style="width:250px;height:250px;" />` : '<p>Generating QR Code... please wait.</p>'}
         <br><a href="/">Back to Dashboard</a>
       </body>
     </html>
@@ -280,4 +281,4 @@ app.listen(PORT, async () => {
   console.log(`Server started on port ${PORT}`);
   await restoreAllSessions();
 });
-  
+                  
