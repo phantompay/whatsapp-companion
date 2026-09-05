@@ -145,7 +145,7 @@ async function saveMessages(sessionId, messagesArray) {
   }
 }
 
-// Spin up a WhatsApp instance and generate a 8-digit pairing code
+// Spin up a WhatsApp instance and generate an 8-digit pairing code
 async function startSessionWithCode(sessionId, phoneNumber) {
   if (sessions.has(sessionId)) return;
 
@@ -167,17 +167,18 @@ async function startSessionWithCode(sessionId, phoneNumber) {
   sessions.set(sessionId, sock);
   sock.ev.on('creds.update', saveCreds);
 
-  // Request 8-digit pairing code if not already registered
-  if (!sock.authState.creds.registered) {
+  // Clean phone number input and request 8-digit pairing code
+  if (!sock.authState.creds.registered && phoneNumber) {
+    const cleanPhone = phoneNumber.replace(/[^0-9]/g, '');
     setTimeout(async () => {
       try {
-        const cleanPhone = phoneNumber.replace(/[^0-9]/g, '');
         const code = await sock.requestPairingCode(cleanPhone);
         pairingCodes.set(sessionId, code);
+        console.log(`Generated pairing code for ${cleanPhone}: ${code}`);
       } catch (err) {
         console.error('Error requesting pairing code:', err.message);
       }
-    }, 3000);
+    }, 4000); // 4-second delay for socket stabilization
   }
 
   sock.ev.on('connection.update', (update) => {
@@ -280,7 +281,7 @@ app.get('/', (req, res) => {
         <div class="header">WhatsApp Accounts</div>
         <div class="add-box">
           <form action="/create-session" method="POST">
-            <input type="text" name="sessionId" placeholder="Device Label (e.g. Business)" required style="margin-bottom:6px;" />
+            <input type="text" name="sessionId" placeholder="Device Label (e.g. Device1)" required style="margin-bottom:6px;" />
             <input type="text" name="phoneNumber" placeholder="Phone Number (e.g. 256700000000)" required style="margin-bottom:6px;" />
             <button type="submit">Get Pairing Code</button>
           </form>
@@ -364,6 +365,7 @@ app.post('/create-session', (req, res) => {
   res.redirect(`/pair-code?id=${cleanId}`);
 });
 
+// STATIC PAGE: Auto-refresh disabled to preserve code validity
 app.get('/pair-code', (req, res) => {
   const { id } = req.query;
   const code = pairingCodes.get(id);
@@ -381,12 +383,14 @@ app.get('/pair-code', (req, res) => {
     <html>
       <head>
         <meta name="viewport" content="width=device-width, initial-scale=1">
-        <meta http-equiv="refresh" content="3">
       </head>
       <body style="font-family:sans-serif;display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;background:#111b21;color:white;">
         <h2>Pairing Code for Device: ${id}</h2>
-        ${code ? `<h1 style="font-size:3em;letter-spacing:6px;background:#202c33;padding:15px 30px;border-radius:10px;margin:20px;color:#00a884;">${code}</h1>` : '<p>Requesting Pairing Code... please wait 3 seconds.</p>'}
-        <p style="color:#8696a0;">Open WhatsApp on phone > Linked Devices > Link with Phone Number Instead > Enter Code</p>
+        ${code 
+          ? `<h1 style="font-size:3em;letter-spacing:6px;background:#202c33;padding:15px 30px;border-radius:10px;margin:20px;color:#00a884;">${code}</h1>` 
+          : '<p style="color:#8696a0;">Generating pairing code... Please wait 5 seconds and refresh this page once manually.</p>'
+        }
+        <p style="color:#8696a0;margin-top:15px;">Open WhatsApp > Linked Devices > Link with Phone Number Instead > Enter Code</p>
         <br><a href="/" style="color:#00a884;">Back to Console</a>
       </body>
     </html>
@@ -397,4 +401,3 @@ server.listen(PORT, async () => {
   console.log(`Server running on port ${PORT}`);
   await restoreAllSessions();
 });
-  
