@@ -14,7 +14,7 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 
-// Initialize PostgreSQL connection pool with rejectUnauthorized: false
+// Initialize PostgreSQL connection pool with SSL bypass for Supabase
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
@@ -23,20 +23,22 @@ const pool = new Pool({
 const sessions = new Map(); // Stores active sockets
 const qrCodes = new Map();  // Stores active QR codes per session
 
-// Initialize Database Tables
+// Initialize Database Tables & Migration
 async function initDB() {
+  // Create tables if they do not exist
   await pool.query(`
     CREATE TABLE IF NOT EXISTS auth_state (
-      session_id TEXT,
-      id TEXT,
+      session_id TEXT DEFAULT 'default',
+      id TEXT NOT NULL,
       data JSONB,
       PRIMARY KEY (session_id, id)
     );
   `);
+
   await pool.query(`
     CREATE TABLE IF NOT EXISTS messages (
       id SERIAL PRIMARY KEY,
-      session_id TEXT,
+      session_id TEXT DEFAULT 'default',
       jid TEXT,
       from_me BOOLEAN,
       sender_name TEXT,
@@ -44,6 +46,15 @@ async function initDB() {
       timestamp TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
     );
   `);
+
+  // Safely alter existing tables if they were created in single-session mode
+  try {
+    await pool.query(`ALTER TABLE auth_state ADD COLUMN IF NOT EXISTS session_id TEXT DEFAULT 'default';`);
+    await pool.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS session_id TEXT DEFAULT 'default';`);
+  } catch (err) {
+    console.log('Migration check complete.');
+  }
+
   console.log('Database initialized successfully.');
 }
 
@@ -187,7 +198,7 @@ async function startSession(sessionId) {
 // Reconnect all saved accounts on boot
 async function restoreAllSessions() {
   await initDB();
-  const res = await pool.query('SELECT DISTINCT session_id FROM auth_state');
+  const res = await pool.query('SELECT DISTINCT session_id FROM auth_state WHERE session_id IS NOT NULL');
   for (const row of res.rows) {
     console.log(`Restoring session: ${row.session_id}`);
     startSession(row.session_id);
@@ -281,4 +292,4 @@ app.listen(PORT, async () => {
   console.log(`Server started on port ${PORT}`);
   await restoreAllSessions();
 });
-                  
+      
