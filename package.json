@@ -1,14 +1,16 @@
 {
-  "name": "whatsapp-companion-render",
+  "name": "whatsapp-companion",
   "version": "1.0.0",
+  "description": "WhatsApp Multi-Device Server",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "@whiskeysockets/baileys": "^6.6.0",
+    "@whiskeysockets/baileys": "^6.7.18",
     "express": "^4.19.2",
     "pg": "^8.11.5",
-    "qrcode": "^1.5.3"
+    "qrcode": "^1.5.3",
+    "socket.io": "^4.7.5"
   }
 }
